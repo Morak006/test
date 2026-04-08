@@ -1,0 +1,142 @@
+#!/bin/bash
+
+echo "=== Расширенный генератор конфигурации HQ-RTR (OSPF Edition) ==="
+
+# 1. Сбор данных интерфейсов
+read -p "Внешний IP (isp interface) [172.16.4.14/28]: " ISP_ADDR
+ISP_ADDR=${ISP_ADDR:-172.16.4.14/28}
+
+read -p "Шлюз провайдера (Default Route) [172.16.4.1]: " ISP_GW
+ISP_GW=${ISP_GW:-172.16.4.1}
+
+read -p "IP VLAN 100 (Server) [192.168.100.1/26]: " VL100_ADDR
+VL100_ADDR=${VL100_ADDR:-192.168.100.1/26}
+
+read -p "IP VLAN 200 (Client) [192.168.100.65/28]: " VL200_ADDR
+VL200_ADDR=${VL200_ADDR:-192.168.100.65/28}
+
+read -p "IP VLAN 999 (Management) [192.168.100.81/29]: " VL999_ADDR
+VL999_ADDR=${VL999_ADDR:-192.168.100.81/29}
+
+# 2. Данные туннеля
+read -p "Внутренний IP туннеля (Tunnel 0) [10.10.10.1/30]: " TUN_ADDR
+TUN_ADDR=${TUN_ADDR:-10.10.10.1/30}
+read -p "Удаленный внешний IP для GRE (BR IP) [172.16.5.14]: " GRE_REMOTE
+GRE_REMOTE=${GRE_REMOTE:-172.16.5.14}
+
+# 3. Настройка OSPF сетей
+echo -e "\n--- Настройка сетей OSPF ---"
+read -p "Сеть туннеля [10.10.10.0/30]: " OSPF_NET_TUN
+OSPF_NET_TUN=${OSPF_NET_TUN:-10.10.10.0/30}
+
+read -p "Сеть VLAN 100 [192.168.100.0/26]: " OSPF_NET_100
+OSPF_NET_100=${OSPF_NET_100:-192.168.100.0/26}
+
+read -p "Сеть VLAN 200 [192.168.100.64/28]: " OSPF_NET_200
+OSPF_NET_200=${OSPF_NET_200:-192.168.100.64/28}
+
+read -p "Сеть VLAN 999 [192.168.100.80/29]: " OSPF_NET_999
+OSPF_NET_999=${OSPF_NET_999:-192.168.100.80/29}
+
+# Подготовка вспомогательных переменных
+ISP_IP_ONLY=$(echo $ISP_ADDR | cut -d'/' -f1)
+TUN_IP_ONLY=$(echo $TUN_ADDR | cut -d'/' -f1)
+VL200_IP_ONLY=$(echo $VL200_ADDR | cut -d'/' -f1)
+
+echo -e "\n--- СКОПИРУЙТЕ КОМАНДЫ НИЖЕ ---\n"
+
+cat <<EOF
+conf t
+hostname hq-rtr
+ip domain-name au-team.irpo
+
+int isp 
+ description "connect ISP"
+ ip address $ISP_ADDR
+ ip nat outside
+ex
+
+port te0
+ service-instance te0/isp
+  encapsulation untagged
+  connect ip interface isp
+ ex
+
+interface vl100
+ description "Server - vlan100"
+ ip address $VL100_ADDR
+ ip nat inside
+ex
+
+interface vl200
+ description "Client - vlan200"
+ ip address $VL200_ADDR
+ ip nat inside
+ex
+
+interface vl999
+ description "Management -vlan999"
+ ip address $VL999_ADDR
+ ip nat inside
+ex
+
+port te1
+ service-instance te1/vl100
+  encapsulation dot1q 100 exact
+  rewrite pop 1
+  connect ip interface vl100
+ ex
+ service-instance te1/vl200
+  encapsulation dot1q 200 exact
+  rewrite pop 1
+  connect ip interface vl200
+ ex
+ service-instance te1/vl999
+  encapsulation dot1q 999 exact 
+  rewrite pop 1
+  connect ip interface vl999
+ ex
+ex
+
+ip route 0.0.0.0/0 $ISP_GW
+
+username net_admin password P@\$\$word role admin
+
+interface tunnel.0
+ description "GRE-to-BR"
+ ip address $TUN_ADDR
+ ip tunnel $ISP_IP_ONLY $GRE_REMOTE mode gre
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 P@\$\$word
+exit
+
+router ospf 1
+ ospf router-id $TUN_IP_ONLY
+ passive-interface default
+ no passive-interface tunnel.0
+ network $OSPF_NET_TUN area 0
+ network $OSPF_NET_100 area 0
+ network $OSPF_NET_200 area 0
+ network $OSPF_NET_999 area 0
+exit
+
+ip nat pool HQ 192.168.100.1-192.168.100.254
+ip nat source dynamic inside-to-outside pool HQ overload interface isp
+
+ip pool HQ 192.168.100.66-192.168.100.78
+dhcp-server 1
+ pool HQ 1
+  mask 28
+  gateway $VL200_IP_ONLY
+  dns 192.168.100.2
+  domain-name au-team.irpo
+ exit
+
+interface vl200
+ dhcp-server 1
+exit
+
+write memory
+EOF
+
+echo -e "\n--- Все настроено ---"

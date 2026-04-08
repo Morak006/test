@@ -1,0 +1,131 @@
+#!/bin/bash
+
+# Проверка на root
+if [[ $EUID -ne 0 ]]; then
+   echo "Ошибка: Запустите скрипт от имени root" 
+   exit 1
+fi
+
+echo "=== Полная настройка HQ-SRV (Network + SSH + BIND DNS) ==="
+
+# --- ПЕРЕМЕННЫЕ ---
+DOMAIN="au-team.irpo"
+HQ_SRV_IP="192.168.100.2"
+HQ_RTR_IP_1="192.168.100.1"
+HQ_RTR_IP_2="192.168.100.65"
+HQ_RTR_IP_3="192.168.100.81"
+HQ_CLI_IP="192.168.100.66"
+BR_RTR_IP="192.168.200.1"
+BR_SRV_IP="192.168.200.2"
+FORWARDER="10.2.0.3"  # Заменено на 10.2.0.3
+
+# 1. СЕТЬ (Авто-определение интерфейса)
+IFACE_ACTUAL=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2; exit}')
+CURRENT_DIR=$(ls /etc/net/ifaces/ | grep -v "default" | grep -v "lo" | head -n 1)
+
+hostnamectl set-hostname hq-srv.$DOMAIN
+
+if [ "$CURRENT_DIR" != "$IFACE_ACTUAL" ]; then
+    echo "Переименование сетевой директории в $IFACE_ACTUAL..."
+    mv "/etc/net/ifaces/$CURRENT_DIR" "/etc/net/ifaces/$IFACE_ACTUAL"
+fi
+
+cat <<EOF > "/etc/net/ifaces/$IFACE_ACTUAL/options"
+TYPE=eth
+EOF
+echo "$HQ_SRV_IP/26" > "/etc/net/ifaces/$IFACE_ACTUAL/ipv4address"
+echo "default via $HQ_RTR_IP_1" > "/etc/net/ifaces/$IFACE_ACTUAL/ipv4route"
+echo "nameserver 127.0.0.1" > "/etc/net/ifaces/$IFACE_ACTUAL/resolv.conf"
+
+systemctl restart network
+
+# 2. ПОЛЬЗОВАТЕЛЬ И SSH
+if ! id "sshuser" &>/dev/null; then
+    useradd sshuser -u 1010
+    echo "sshuser:P@ssw0rd" | chpasswd
+    usermod -aG wheel sshuser
+    echo "sshuser ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+fi
+
+sed -i '/^Port/d; /^AllowUsers/d; /^MaxAuthTries/d; /^Banner/d' /etc/openssh/sshd_config
+echo -e "Port 2024\nAllowUsers sshuser\nMaxAuthTries 2\nBanner /etc/openssh/banner" >> /etc/openssh/sshd_config
+echo "Authorized access only" > /etc/openssh/banner
+systemctl restart sshd.service
+
+# 3. УСТАНОВКА И НАСТРОЙКА BIND
+echo "Установка Bind..."
+apt-get update && apt-get install bind bind-utils -y
+
+echo "Настройка options.conf..."
+cat <<EOF > /etc/bind/options.conf
+options {
+    directory "/var/lib/bind";
+    listen-on { any; };
+    listen-on-v6 { none; };
+    forwarders { $FORWARDER; };  # Используется 10.2.0.3
+    allow-query { any; };
+    allow-recursion { any; };
+};
+EOF
+
+echo "Настройка rfc1912.conf..."
+# Очищаем или создаем заново блок зон
+sed -i "/zone \"$DOMAIN\"/,\$d" /etc/bind/rfc1912.conf
+cat <<EOF >> /etc/bind/rfc1912.conf
+zone "$DOMAIN" {
+    type master;
+    file "$DOMAIN";
+};
+
+zone "100.168.192.in-addr.arpa" {
+    type master;
+    file "100.168.192.in-addr.arpa";
+};
+EOF
+
+# 4. СОЗДАНИЕ ФАЙЛОВ ЗОН
+echo "Создание прямой зоны $DOMAIN..."
+cat <<EOF > /etc/bind/zone/$DOMAIN
+\$TTL 1D
+@ IN SOA $DOMAIN. root.$DOMAIN. (
+    $(date +%Y%m%d)00 ; serial
+    12H ; refresh
+    1H  ; retry
+    1W  ; expire
+    1H  ; ncache
+)
+@      IN NS    $DOMAIN.
+@      IN A     $HQ_SRV_IP
+hq-srv IN A     $HQ_SRV_IP
+hq-rtr IN A     $HQ_RTR_IP_1
+hq-rtr IN A     $HQ_RTR_IP_2
+hq-rtr IN A     $HQ_RTR_IP_3
+br-rtr IN A     $BR_RTR_IP
+br-srv IN A     $BR_SRV_IP
+hq-cli IN A     $HQ_CLI_IP
+EOF
+
+echo "Создание обратной зоны..."
+cat <<EOF > /etc/bind/zone/100.168.192.in-addr.arpa
+\$TTL 1D
+@ IN SOA $DOMAIN. root.$DOMAIN. (
+    $(date +%Y%m%d)00 ; serial
+    12H ; refresh
+    1H  ; retry
+    1W  ; expire
+    1H  ; ncache
+)
+@  IN NS    $DOMAIN.
+1  IN PTR   hq-rtr.$DOMAIN.
+65 IN PTR   hq-rtr.$DOMAIN.
+81 IN PTR   hq-rtr.$DOMAIN.
+2  IN PTR   hq-srv.$DOMAIN.
+66 IN PTR   hq-cli.$DOMAIN.
+EOF
+
+# 5. ПРАВА И ЗАПУСК
+chown root:named /etc/bind/zone/$DOMAIN
+chown root:named /etc/bind/zone/100.168.192.in-addr.arpa
+systemctl enable --now bind
+
+echo "=== Настройка HQ-SRV завершена. ==="

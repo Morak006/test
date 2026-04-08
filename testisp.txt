@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Проверка на запуск от имени root
+if [[ $EUID -ne 0 ]]; then
+   echo "Этот скрипт должен быть запущен от имени root" 
+   exit 1
+fi
+
+# Ввод данных пользователем
+read -p "Введите IP/маску для eth1 (например, 172.16.4.1/28): " ADDR_ETH1
+read -p "Введите IP/маску для eth2 (например, 172.16.5.1/28): " ADDR_ETH2
+
+# Извлечение подсетей для правил iptables (удаление части после последнего слеша или точки)
+NET_ETH1=$(echo $ADDR_ETH1 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH1 | cut -d'/' -f2)
+NET_ETH2=$(echo $ADDR_ETH2 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH2 | cut -d'/' -f2)
+
+echo "--- Настройка Hostname ---"
+hostnamectl set-hostname isp;exec bash
+
+echo "--- Настройка сети (/etc/network/interfaces) ---"
+cat <<EOF > /etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+
+auto eth1
+iface eth1 inet static
+    address $ADDR_ETH1
+
+auto eth2
+iface eth2 inet static
+    address $ADDR_ETH2
+EOF
+
+echo "--- Включение IP Forwarding ---"
+sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
+# Применяем изменения немедленно
+sysctl -w net.ipv4.ip_forward=1
+
+echo "--- Перезапуск сетевой службы ---"
+systemctl restart networking
+
+echo "--- Настройка NAT (iptables) ---"
+iptables -t nat -F
+iptables -t nat -A POSTROUTING -s $NET_ETH1 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $NET_ETH2 -o eth0 -j MASQUERADE
+
+# Просмотр правил
+iptables -t nat -L -v -n
+
+# Сохранение правил
+mkdir -p /root
+iptables-save > /root/rules
+
+echo "--- Настройка автозагрузки правил через Cron ---"
+# Проверка, нет ли уже такой записи в crontab
+(crontab -l 2>/dev/null | grep -v "iptables-restore") | { cat; echo "@reboot /sbin/iptables-restore < /root/rules"; } | crontab -
+
+echo "--- Настройка времени ---"
+apt-get update && apt-get install -y tzdata
+timedatectl set-timezone Europe/Moscow
+
+echo "--- Готово! ---"

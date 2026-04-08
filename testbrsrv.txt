@@ -1,0 +1,100 @@
+#!/bin/bash
+
+# Проверка на root
+if [[ $EUID -ne 0 ]]; then
+   echo "Ошибка: Запустите скрипт от имени root (через su - или sudo)" 
+   exit 1
+fi
+
+echo "=== Настройка сервера BR (Alt Linux) ==="
+
+# 1. Автоматическое определение интерфейса
+# Берем первый попавшийся интерфейс, который не lo
+IFACE=$(ip -o link show | awk -F': ' '$2 != "lo" {print $2; exit}')
+
+if [ -z "$IFACE" ]; then
+    echo "Ошибка: Сетевые интерфейсы не найдены!"
+    exit 1
+fi
+
+echo "Обнаружен интерфейс: $IFACE"
+
+# 2. Ввод данных пользователем
+read -p "Введите IP адрес/маску (напр. 192.168.200.2/27): " BR_IP
+BR_IP=${BR_IP:-192.168.200.2/27}
+
+read -p "Введите шлюз по умолчанию (напр. 192.168.200.1): " BR_GW
+BR_GW=${BR_GW:-192.168.200.1}
+
+read -p "Введите DNS сервер [10.2.0.3]: " BR_DNS
+BR_DNS=${BR_DNS:-10.2.0.3}
+
+# 3. Настройка Hostname
+hostnamectl set-hostname br.srv.au-team.irpo
+
+# 4. Настройка сети через /etc/net
+NET_DIR="/etc/net/ifaces/$IFACE"
+
+# Проверяем, существует ли папка с именем интерфейса. 
+# Если в /etc/net/ifaces/ сейчас лежит что-то другое (например, eth0), переименуем это.
+OLD_DIR=$(ls -d /etc/net/ifaces/* | grep -v "default" | grep -v "lo" | head -n 1)
+
+if [ "$OLD_DIR" != "$NET_DIR" ] && [ -d "$OLD_DIR" ]; then
+    echo "Переименование конфигурации из $OLD_DIR в $NET_DIR"
+    mv "$OLD_DIR" "$NET_DIR"
+else
+    mkdir -p "$NET_DIR"
+fi
+
+# Запись конфигурации
+echo "TYPE=eth" > "$NET_DIR/options"
+echo "$BR_IP" > "$NET_DIR/ipv4address"
+echo "default via $BR_GW" > "$NET_DIR/ipv4route"
+echo "nameserver $BR_DNS" > "$NET_DIR/resolv.conf"
+
+echo "Перезапуск сети..."
+systemctl restart network
+
+# 5. Создание пользователя
+echo "Создание пользователя sshuser..."
+if id "sshuser" &>/dev/null; then
+    echo "Пользователь уже существует."
+else
+    useradd sshuser -u 1010
+    echo "sshuser:P@ssw0rd" | chpasswd
+    usermod -aG wheel sshuser
+fi
+
+# Настройка sudoers без пароля
+if ! grep -q "sshuser ALL" /etc/sudoers; then
+    echo "sshuser ALL=(ALL:ALL) NOPASSWD: ALL" >> /etc/sudoers
+fi
+
+# 6. Настройка SSH
+echo "Настройка SSH (порт 2024)..."
+SSHD_CONF="/etc/openssh/sshd_config"
+
+# Делаем бэкап
+cp $SSHD_CONF ${SSHD_CONF}.bak
+
+# Обновляем параметры (удаляем старые, добавляем новые)
+sed -i '/^Port/d' $SSHD_CONF
+sed -i '/^AllowUsers/d' $SSHD_CONF
+sed -i '/^MaxAuthTries/d' $SSHD_CONF
+sed -i '/^Banner/d' $SSHD_CONF
+
+echo "Port 2024" >> $SSHD_CONF
+echo "AllowUsers sshuser" >> $SSHD_CONF
+echo "MaxAuthTries 2" >> $SSHD_CONF
+echo "Banner /etc/openssh/banner" >> $SSHD_CONF
+
+# Создание баннера
+echo "Authorized access only" > /etc/openssh/banner
+
+echo "Перезапуск SSH..."
+systemctl restart sshd.service
+
+echo -e "\n=== Настройка завершена! ==="
+echo "Hostname: $(hostname)"
+echo "IP: $(ip -br a show $IFACE)"
+echo "SSH Port: 2024"

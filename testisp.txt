@@ -1,63 +1,48 @@
 #!/bin/bash
 
-# 1. Проверка прав (строка 2) - исправлено для совместимости
-if [ "$(id -u)" -ne 0 ]; then
-   echo "Ошибка: запустите от имени root" 
+# СТРОКА 2: Простая проверка прав (совместима со всеми оболочками)
+if [ "$(id -u)" != "0" ]; then
+   echo "Запустите от root (sudo)"
    exit 1
 fi
 
 # Ввод данных
-read -p "IP/маска для eth1 [172.16.4.1/28]: " ADDR_ETH1
-ADDR_ETH1=${ADDR_ETH1:-172.16.4.1/28}
-read -p "IP/маска для eth2 [172.16.5.1/28]: " ADDR_ETH2
-ADDR_ETH2=${ADDR_ETH2:-172.16.5.1/28}
+read -p "IP eth1 [172.16.4.1/28]: " A1
+A1=${A1:-172.16.4.1/28}
+read -p "IP eth2 [172.16.5.1/28]: " A2
+A2=${A2:-172.16.5.1/28}
 
-# Расчет подсетей (улучшенная логика)
-NET_ETH1=$(echo $ADDR_ETH1 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH1 | cut -d'/' -f2)
-NET_ETH2=$(echo $ADDR_ETH2 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH2 | cut -d'/' -f2)
+# Расчет сетей
+N1=$(echo $A1 | cut -d'.' -f1-3).0/$(echo $A1 | cut -d'/' -f2)
+N2=$(echo $A2 | cut -d'.' -f1-3).0/$(echo $A2 | cut -d'/' -f2)
 
-# Настройка Hostname
+# Настройка Hostname и Сети
 hostnamectl set-hostname isp
-
-# Настройка сети
-cat <<EOF > /etc/network/interfaces
-auto lo
-iface lo inet loopback
-
-auto eth0
-iface eth0 inet dhcp
-
-auto eth1
-iface eth1 inet static
-    address $ADDR_ETH1
-
-auto eth2
-iface eth2 inet static
-    address $ADDR_ETH2
-EOF
+echo -e "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n\nauto eth1\niface eth1 inet static\n    address $A1\n\nauto eth2\niface eth2 inet static\n    address $A2" > /etc/network/interfaces
 
 # Forwarding
-sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-sysctl -p
+echo 1 > /proc/sys/net/ipv4/ip_forward
+sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf 2>/dev/null
 
-# Перезапуск сети
+# Рестарт сети
 systemctl restart networking
 
-# NAT
+# NAT (iptables)
 iptables -t nat -F
-iptables -t nat -A POSTROUTING -s $NET_ETH1 -o eth0 -j MASQUERADE
-iptables -t nat -A POSTROUTING -s $NET_ETH2 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $N1 -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -s $N2 -o eth0 -j MASQUERADE
 
 # Сохранение правил
 mkdir -p /root
 iptables-save > /root/rules
 
-# 2. Настройка Cron (строки 70-71) - полностью переписано на надежный метод
-CRON_JOB="@reboot /sbin/iptables-restore < /root/rules"
-(crontab -l 2>/dev/null | grep -Fv "$CRON_JOB"; echo "$CRON_JOB") | crontab -
+# СТРОКИ 63-64 (Cron): Новый максимально надежный метод
+# Мы просто создаем файл в cron.d, это надежнее, чем править crontab -e
+echo "@reboot root /sbin/iptables-restore < /root/rules" > /etc/cron.d/iptables_restore
+chmod 644 /etc/cron.d/iptables_restore
 
 # Время
 apt-get update && apt-get install -y tzdata
 timedatectl set-timezone Europe/Moscow
 
-echo "Настройка завершена успешно."
+echo "Done!"

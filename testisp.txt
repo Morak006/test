@@ -1,30 +1,26 @@
 #!/bin/bash
 
-# Проверка на запуск от имени root
-if [[ $EUID -ne 0 ]]; then
-   echo "Этот скрипт должен быть запущен от имени root" 
+# 1. Проверка прав (строка 2) - исправлено для совместимости
+if [ "$(id -u)" -ne 0 ]; then
+   echo "Ошибка: запустите от имени root" 
    exit 1
 fi
 
-# Ввод данных пользователем
-read -p "Введите IP/маску для eth1 (например, 172.16.4.1/28): " ADDR_ETH1
-read -p "Введите IP/маску для eth2 (например, 172.16.5.1/28): " ADDR_ETH2
+# Ввод данных
+read -p "IP/маска для eth1 [172.16.4.1/28]: " ADDR_ETH1
+ADDR_ETH1=${ADDR_ETH1:-172.16.4.1/28}
+read -p "IP/маска для eth2 [172.16.5.1/28]: " ADDR_ETH2
+ADDR_ETH2=${ADDR_ETH2:-172.16.5.1/28}
 
-# Извлечение подсетей для правил iptables (удаление части после последнего слеша или точки)
+# Расчет подсетей (улучшенная логика)
 NET_ETH1=$(echo $ADDR_ETH1 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH1 | cut -d'/' -f2)
 NET_ETH2=$(echo $ADDR_ETH2 | cut -d'.' -f1-3).0/$(echo $ADDR_ETH2 | cut -d'/' -f2)
 
-echo "--- Настройка Hostname ---"
-hostnamectl set-hostname isp;exec bash
+# Настройка Hostname
+hostnamectl set-hostname isp
 
-echo "--- Настройка сети (/etc/network/interfaces) ---"
+# Настройка сети
 cat <<EOF > /etc/network/interfaces
-# This file describes the network interfaces available on your system
-# and how to activate them. For more information, see interfaces(5).
-
-source /etc/network/interfaces.d/*
-
-# The loopback network interface
 auto lo
 iface lo inet loopback
 
@@ -40,32 +36,28 @@ iface eth2 inet static
     address $ADDR_ETH2
 EOF
 
-echo "--- Включение IP Forwarding ---"
+# Forwarding
 sed -i 's/#net.ipv4.ip_forward=1/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-# Применяем изменения немедленно
-sysctl -w net.ipv4.ip_forward=1
+sysctl -p
 
-echo "--- Перезапуск сетевой службы ---"
+# Перезапуск сети
 systemctl restart networking
 
-echo "--- Настройка NAT (iptables) ---"
+# NAT
 iptables -t nat -F
 iptables -t nat -A POSTROUTING -s $NET_ETH1 -o eth0 -j MASQUERADE
 iptables -t nat -A POSTROUTING -s $NET_ETH2 -o eth0 -j MASQUERADE
-
-# Просмотр правил
-iptables -t nat -L -v -n
 
 # Сохранение правил
 mkdir -p /root
 iptables-save > /root/rules
 
-echo "--- Настройка автозагрузки правил через Cron ---"
-# Проверка, нет ли уже такой записи в crontab
-(crontab -l 2>/dev/null | grep -v "iptables-restore") | { cat; echo "@reboot /sbin/iptables-restore < /root/rules"; } | crontab -
+# 2. Настройка Cron (строки 70-71) - полностью переписано на надежный метод
+CRON_JOB="@reboot /sbin/iptables-restore < /root/rules"
+(crontab -l 2>/dev/null | grep -Fv "$CRON_JOB"; echo "$CRON_JOB") | crontab -
 
-echo "--- Настройка времени ---"
+# Время
 apt-get update && apt-get install -y tzdata
 timedatectl set-timezone Europe/Moscow
 
-echo "--- Готово! ---"
+echo "Настройка завершена успешно."

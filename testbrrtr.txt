@@ -1,0 +1,71 @@
+! --- Системные настройки ---
+hostname br-rtr
+ip domain-name au-team.irpo
+
+! --- Пользователь ---
+username net_admin password P@$$word role admin
+
+! --- Интерфейс в сторону ISP (Филиал) ---
+ip interface isp
+ description "connect ISP"
+ ip address 172.16.5.14/28
+ exit
+
+port te0
+ service-instance te0/isp
+  encapsulation untagged
+  connect ip interface isp
+  exit
+ exit
+
+! --- Локальная сеть филиала BR ---
+ip interface BR-NET
+ description "Connect BR-NET"
+ ip address 192.168.200.1/27
+ exit
+
+port te1
+ service-instance te1/BR-NET
+  encapsulation untagged
+  connect ip interface BR-NET
+  exit
+ exit
+
+! --- Маршрутизация и GRE Туннель к HQ ---
+ip route 0.0.0.0/0 172.16.5.1
+
+interface tunnel.0
+ description "GRE-to-HQ"
+ ip address 10.10.10.2/30
+ ip tunnel 172.16.5.14 172.16.4.14 mode gre
+ exit
+
+! --- Настройка OSPF ---
+router ospf 1
+ ospf router-id 10.10.10.2
+ passive-interface default
+ no passive-interface tunnel.0
+ ! Объявляем сеть туннеля и локальную сеть филиала
+ network 10.10.10.0/30 area 0
+ network 192.168.200.0/27 area 0
+ exit
+
+interface tunnel.0
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 P@$$word
+ exit
+
+! --- Настройка NAT ---
+ip interface isp
+ ip nat outside
+ exit
+ip interface BR-NET
+ ip nat inside
+ exit
+
+! Пул адресов для трансляции (обычно используется диапазон из подсети BR)
+ip nat pool BR_POOL 192.168.200.2 192.168.200.30
+ip nat source dynamic inside-to-outside pool BR_POOL overload interface isp
+
+! --- Фиксация настроек ---
+write memory

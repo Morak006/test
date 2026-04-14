@@ -1,0 +1,77 @@
+; Нажмите F8, чтобы запустить выполнение конфигурации
+F8::
+SetKeyDelay, 50, 10 ; Задержка между нажатиями (в мс) для стабильности
+
+; --- Вход в режим конфигурации ---
+Send, en {enter}
+Sleep, 200
+Send, conf t{Enter}
+Sleep, 200
+Send, hostname br-rtr{Enter}
+Sleep, 200
+Send, ip domain-name au-team.irpo{Enter}
+Send, username net_admin {enter}
+Send, password P@$$word {enter}
+Send, role admin{Enter}
+Send, exit{Enter}
+
+; --- Настройка L3-интерфейсов ---
+Send, interface isp{Enter}
+Send, description "connect ISP"{Enter}
+Send, ip address 172.16.5.14/28{Enter}
+Send, ip nat outside{Enter}
+Send, exit{Enter}
+
+Send, interface BR-NET{Enter}
+Send, description "Connect BR-NET"{Enter}
+Send, ip address 192.168.200.1/27{Enter}
+Send, ip nat inside{Enter}
+Send, exit{Enter}
+
+; --- Привязка к физическим портам ---
+Send, port te0{Enter}
+Send, service-instance te0/isp{Enter}
+Send, encapsulation untagged{Enter}
+Send, connect ip interface isp{Enter}
+Send, exit{Enter}
+Send, exit{Enter}
+
+Send, port te1{Enter}
+Send, service-instance te1/BR-NET{Enter}
+Send, encapsulation untagged{Enter}
+Send, connect ip interface BR-NET{Enter}
+Send, exit{Enter}
+Send, exit{Enter}
+
+; --- VPN Туннель и Маршрутизация ---
+Send, interface tunnel.0{Enter}
+Send, description "GRE-to-HQ"{Enter}
+Send, ip address 10.10.10.2/30{Enter}
+Send, ip tunnel 172.16.5.14 172.16.4.14 mode gre{Enter}
+Send, ip ospf authentication message-digest{Enter}
+Send, ip ospf message-digest-key 1 md5 P@$$word{Enter}
+Send, exit{Enter}
+
+Send, ip route 0.0.0.0/0 172.16.5.1{Enter}
+
+Send, router ospf 1{Enter}
+Send, ospf router-id 10.10.10.2{Enter}
+Send, passive-interface default{Enter}
+Send, no passive-interface tunnel.0{Enter}
+Send, network 10.10.10.0/30 area 0{Enter}
+Send, network 192.168.200.0/27 area 0{Enter}
+
+; --- Настройка NAT ---
+Send, ip nat pool BR 172.16.5.14 172.16.5.14{Enter}
+Send, ip nat source dynamic inside-to-outside pool BR overload interface isp{Enter}
+
+; --- Завершение и проверка ---
+Send, do write memory{Enter}
+Sleep, 1000 ; Дополнительное время для сохранения
+Send, show ip interface brief{Enter}
+
+MsgBox, Конфигурация успешно отправлена!
+return
+
+; Нажмите Esc, чтобы экстренно остановить скрипт
+Esc::ExitApp
